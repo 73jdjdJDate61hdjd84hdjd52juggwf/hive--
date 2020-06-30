@@ -1,0 +1,619 @@
+Day04-1012
+内容：
+1.Hive离线分析平台的应用
+2.常见内置函数和自定义函数
+3.压缩和存储格式
+
+[扩展]：
+分析函数和窗口函数
+四种排序
+桶表的创建及数据的加载
+
+一、Hive在离线分析平台的应用
+1.网站
+	电商网站：
+		京东、淘宝、一号店
+	游戏网站
+		4399 17173 【游戏推广 游戏排行榜 账号交易】
+	旅游网站
+		途牛 【报团，景点推荐，售票】
+	在线教育
+		学员的行为（浏览课程，课程咨询，购买课程）
+---
+	金融（银行 保险 借贷）
+
+	物流
+
+
+2.统计分析指标		网站 KPI指标
+	基本指标：PV UV 独立IP 二跳率 客户转化 会话时长
+
+3.统计数据的来源
+	应用服务器的日志文件
+	【扩展】
+	WEB服务器：只负责处理静态网页HTML，通过HTTP协议
+
+	应用服务器：负责 处理JSP，Servlet，负责业务逻辑页面跳转
+
+	Nginx  JBoss apache 原生的日志并没有这些数据
+ 
+	【网站埋点技术：jsSDK JavaSDK】 【爬虫】
+
+4.日志收集系统
+	Flume
+	Kafka
+	【扩展了解ELK】：日志收集平台
+
+5.ETL
+抽取（Extract）：
+	Flume
+	Kafka
+	【扩展了解ELK】：日志收集平台
+
+转换（Transform）：原始数据 -加工（过滤，解析，补全，拆分，提取，合并）->可供分析的表（多张表 星型模型 雪花模型）
+
+过滤清洗
+	写MR程序
+	过滤空值，脏数据
+	字段解析 补全
+
+加载（Load）：进数据仓库 SQL统计分析
+
+6.Hive统计分析 （思路） 【扩展了解：impala】 SQL on  Hadoop
+	1）.创建什么样的表
+	2）.根据业务（7个：用户模块，订单模块，地域维度模块），创建中间表，大表拆小表，统计分析模块可以减少数据量的反复加载
+
+【多维度分析：时间，地域维度，平台，浏览器维度】
+
+周期性统计分析：天   //粒度问题 最小的分析时间单位  /h 每小时
+
+【案例】
+1.创建二级分区表
+//创建数据库
+create database db_track;
+
+//创建二级分区表
+create table tracklog(
+id                 string,
+url                string,
+referer            string,
+keyword            string,
+type               string,
+guid               string,
+pageId             string,
+moduleId           string,
+linkId             string,
+attachedInfo       string,
+sessionId          string,
+trackerU           string,
+trackerType        string,
+ip                 string,
+trackerSrc         string,
+cookie             string,
+orderCode          string,
+trackTime          string,
+endUserId          string,
+firstLink          string,
+sessionViewNo      string,
+productId          string,
+curMerchantId      string,
+provinceId         string,
+cityId             string,
+fee                string,
+edmActivity        string,
+edmEmail           string,
+edmJobId           string,
+ieVersion          string,
+platform           string,
+internalKeyword    string,
+resultSum          string,
+currentPage        string,
+linkPosition       string,
+buttonPosition     string
+)
+partitioned by (date string, hour string)
+row format delimited fields terminated by '\t';
+
+load data local inpath '/home/user01/tracklogs/20150828/2015082818' into table tracklog partition(date="20150828",hour="18");
+
+load data local inpath '/home/user01/tracklogs/20150828/2015082819' into table tracklog partition(date="20150828",hour="19");
+
+2.根据不同的统计分析业务需求创建中间表或者临时表，以及结果表
+//创建统计结果表
+create table static_PVUV(
+date  string,
+hour string,
+pv int,
+uv int
+)
+row format delimited fields terminated by '\t';
+
+//统计分析并插入结果表中
+insert overwrite  table static_PVUV select date,hour,count(url),count(distinct guid) from tracklog where date="20150828" group by date,hour;
+
+
+20150828	18	64972	23938
+20150828	19	61162	22330
+
+3）统计分析结果数据导出到mysql，以便于作图形化展示
+借助SQOOP
+
+create database daily_log;
+use daily_log;
+
+create table static_PVUV(
+date  int,
+hour int,
+pv int,
+uv int
+);
+
+4)Sqoop导出数据
+vim hive2mysql.opt
+
+export
+--connect
+jdbc:mysql://bigdata.ibeifeng.com:3306/daily_log
+--username
+root
+--password
+root123
+--table
+static_PVUV
+--input-fields-terminated-by
+\t
+--export-dir
+/user/hive/warehouse/db_track.db/static_pvuv   //在hive中使用desc formatted static_PVUV;来确认表的目录所在
+
+{$SQOOP_HOME}下
+bin/sqoop --options-file /home/user01/hive2mysql.opt
+
++----------+------+-------+-------+
+| date     | hour | pv    | uv    |
++----------+------+-------+-------+
+| 20150828 |   19 | 61162 | 22330 |
+| 20150828 |   18 | 64972 | 23938 |
++----------+------+-------+-------+
+
+5）使用shell脚本结合定时脚本周期性自动执行
+--数据从本地加载--
+#!/bin/sh
+##执行环境变量,以便于脚本中可以使用。“.”的后面有一个空格,代表执行这个脚本文件
+. /etc/profile
+
+# 定义Hive目录
+HIVE_DIR=/opt/modules/cdh/hive-0.13.1-cdh5.3.6
+
+# 定义数据源目录
+DATA_LOG=/home/user01/tracklogs
+
+# 定义昨天的日期,按照固定格式,可以使用echo $(date --date="1 day ago" +%Y%m%d)尝试
+YESTERDAY=$(date --date="1 day ago" +%Y%m%d)
+
+# for循环中do...done中间的循环体执行的次数等于in后面元素的个数
+# 在我们这里,hql文件被调用了2次
+for LOG_DAY in `ls $DATA_LOG/$YESTERDAY`
+do
+#分别取出文件名中的日期和小时
+DATE=${LOG_DAY:0:8}
+HOUR=${LOG_DAY:8:2}
+
+#在测试时,可以使用echo打印下面命令
+$HIVE_DIR/bin/hive -e "load data local inpath '$DATA_LOG/$YESTERDAY/${DATE}${HOUR}' into table db_log.track_log partition (date='$DATE',hour='$HOUR')"
+done
+
+---数据从HDFS加载---
+#!/bin/sh
+#向数据源每隔一天导入一次数据
+
+#加载环境变量
+. /etc/profile
+
+#定义hadoop的安装位置
+HADOOP_HOME=/opt/modules/cdh/hadoop-2.5.0-cdh5.3.6
+#定义hive的安装位置
+HIVE_HOME=/opt/modules/cdh/hive-0.13.1-cdh5.3.6
+#定义S上一个小时数(对应相应的文件夹)
+LAST_DAY=`date -d  '1 day ago' '+%Y%m%d'`
+#定义数据源文件的位置变量(HDFS上位置)
+DATA_LOGS='/user/datas'
+#取出每天下面的下面的数据导入到hive中
+for DAY_MESSAGE in `$HADOOP_HOME/bin/hdfs dfs -ls $DATA_LOGS/$LAST_DAY`
+do
+#取出最后一级文件夹的名字(2017080409)
+#-rw-r--r--   1 xiaomixiu supergroup   39425518 2017-08-05 10:22 /user/datas/20170804/2017080409
+DATA_DAY=`echo $DAY_MESSAGE | awk '{split($DAY_MESSAGE,a,"/");print a[5]}'`
+DATE=${DATA_DAY:0:8}
+HOUR=${DATA_DAY:8:2}
+#将hdfs文件导入到hive二级分区表中
+$HIVE_HOME/bin/hive -e "load data inpath '$DATA_LOGS/$LAST_DAY/$DATA_DAY' into table demo.demo_pvuv partition(date='$DATE',hour='$HOUR')"
+done
+
+===crontable 定时任务
+30	0  * 	* 	*    /bin/sh /home/user01/loaddata.sh  
+
+扩展：
+awk格式化输出命令 -F指定结构化文件的分隔符  print打印到控制台 $(1)打印第一列数据
+awk -F"分隔符" '{print $(1)}' /etc/passwd 
+
+
+二、Hive的内置函数
+1.查看内置函数的相关指令
+	查看所有的内置函数：
+	show functions;
+	显示函数的描述信息
+	desc function substr;
+	显示函数的扩展描述信息
+	desc function extended substr;
+
+2.内置函数分类
+					Hive的函数
+
+数学函数
+	round   -四舍五入
+	select round(12.3456, 2), round(12.3456, 0), round(12.3456, -1), round(12.3456, -2);
+	ceil  --向上取整
+	select ceil(12.3456)
+	floor  --向下取整
+	select floor(12.3456)
+
+字符函数
+	lower() --将所有字符转换成小写
+	upper() --将所有字符转换成大写
+select lower('Hello World'),upper('Hello World');
+	length  --字符传串长度
+	concat --连接字符串
+select concat(empname,salary) form emp ;
+	substr --字符串截取
+select  substr(birthday,1,4) from emp;
+	trim  --去空格
+	lpad  --左填充 第一个代表被填充的对象，第二个代表填充之后的总位数，第三个代表用什么填充
+	rpad  --右填充 
+select lpad('Hello',12,'lilei,'),rpad('Hello',14,'lilei');
+
+
+日期函数
+	unix_timestamp    --将时间转化为时间戳
+select  unix_timestamp('2017-03-13 15:22:30');
+
+	to_date --抽取date或者日期中的date部分
+select to_date('2017-03-13 15:22:30');
+	
+	year
+	month
+	day
+select year('2017-03-13 15:22:30'),month('2017-03-13 15:22:30'),day('2017-03-13 15:22:30');
+	
+	weekofyear --指定的日期输入一年中的哪一周
+	select weekofyear('2017-03-13 15:22:30')；	
+
+	datediff  --指定的两个日期之间的相差的时间
+	select datediff('2017-03-13 15:22:30','2016-03-13 15:22:30');
+
+	date_add  --指定的日期加上一个数字的日期
+	date_sub   --指定的日期减去一个数字的日期
+	select date_add('2017-03-13 15:22:30',2),date_sub('2017-03-13 15:22:30',2);
+
+
+类型转换函数
+	cast
+select cast(1422/1000 as int) from emp;
+
+条件函数
+    if
+    select if(bouners is null,0.0,bouners) from emp;  //判断bouners是否为null，是返回0.0 不是返回本身
+
+	coalesce -c从左到右返回第一个不为null的值
+
+	case a when b then c [when d then e]* [else f] end
+	case  when a then b [when c then d]* [else e] end
+
+应用案例：
+涨工资，总裁+1000，经理+800，其uame='PRESIDENT' then  salary+1000 when jobname='MANAGER' then salary+800 else salary+400 end from emp;
+
+select empno, name,job,salary, case when salary < 1000 then 'low' when salary >= 1000 and salary < 3000 then 'middle' when salary >= 3000 then 'high' end from  emp;
+
+特殊函数：
+		窗口函数：lead   lag   FIRST_VALUE
+		分析函数:RANK ROW_NUMBER 
+		lead(表达式,1,defaut)
+
+select name,salary,deptid,lead(name,1,"ok") over(partition by deptid order by salary) rank from emp ;
+MILLER	1300.0	10	CLARK
+CLARK	2450.0	10	KING
+KING	5000.0	10	ok
+SMITH	800.0	20	ADAMS
+ADAMS	1100.0	20	JONES
+JONES	2975.0	20	SCOTT
+SCOTT	3000.0	20	FORD
+FORD	3000.0	20	ok
+JAMES	950.0	30	MARTIN
+MARTIN	1250.0	30	WARD
+WARD	1250.0	30	TURNER
+TURNER	1500.0	30	ALLEN
+ALLEN	1600.0	30	BLAKE
+BLAKE	2850.0	30	ok
+
+select name,salary,deptid,empid,lag(empid,2,0000) over(partition by deptid order by salary desc) rank from emp ;
+
+name	salary	deptid	empid	rank
+KING	5000.0	10	7839	0
+CLARK	2450.0	10	7782	0
+MILLER	1300.0	10	7934	7839
+SCOTT	3000.0	20	7788	0
+FORD	3000.0	20	7902	0
+JONES	2975.0	20	7566	7788
+ADAMS	1100.0	20	7876	7902
+SMITH	800.0	20	7369	7566
+BLAKE	2850.0	30	7698	0
+ALLEN	1600.0	30	7499	0
+TURNER	1500.0	30	7844	7698
+MARTIN	1250.0	30	7654	7499
+WARD	1250.0	30	7521	7844
+JAMES	950.0	30	7900	7654
+
+
+三、四种排序
+1、order   by   //可以指定desc 降序 asc 升序
+order by会对输入做全局排序，因此只有一个Reducer(多个Reducer无法保证全局有序)，然而只有一个Reducer，会导致当输入规模较大时，消耗较长的计算时间。
+
+mapreduce 默认的分区算法hash 取模
+a c e reduce-0
+b d f reduce-1
+
+a b c d e f 
+
+e.g.1:
+create table  temperature(       
+year int,
+temper float
+)
+row format delimited fields terminated by '\t';
+
+temperature.year	temperature.temper
+2008	32.0
+2008	21.0
+2008	31.5
+2008	17.0
+2013	34.0
+2015	32.0
+2015	33.0
+2015	15.9
+2015	31.0
+2015	19.9
+2015	27.0
+2016	23.0
+2016	39.9
+2016	32.0
+
+2.sort by 
+sort by不是全局排序，其在数据进入reducer前完成排序，因此，如果用sort by进行排序，并且设置mapred.reduce.tasks > 1，则sort by只会保证每个reducer的输出有序，并不保证全局有序。sort by不同于order by，它不受Hive.mapred.mode属性的影响，sort by的数据只能保证在同一个reduce中的数据可以按指定字段排序。使用sort by你可以指定执行的reduce个数(通过set mapred.reduce.tasks=n来指定)，对输出的数据再执行归并排序，即可得到全部结果。
+
+/设置reduce个数为3;
+set mapred.reduce.tasks=3; （MRV1）
+set mapreduce.job.reduces=3; （MRV2）
+//查询此次任务中reduce的个数;
+set mapred.reduce.tasks;
+
+insert overwrite local directory '/home/user01/sort' row format delimited fields terminated by '\t' select * from temperature sort by year;
+
+[user01@hadoop sort]$ ls
+000000_0  000001_0  000002_0
+[user01@hadoop sort]$ cat 000000_0 
+2008	31.5
+2008	21.0
+2015	31.0
+2015	32.0
+2015	33.0
+2016	23.0
+[user01@hadoop sort]$ cat 000001_0 
+2008	17.0
+2013	34.0
+2015	19.9
+2015	15.9
+2016	39.9
+2016	32.0
+[user01@hadoop sort]$ cat 000002_0 
+2008	32.0
+2015	27.0
+
+
+3.distribute  by 
+distribute by是控制在map端如何拆分数据给reduce端的。hive会根据distribute by后面列，对应reduce的个数进行分发，默认是采用hash算法。sort by为每个reduce产生一个排序文件。在有些情况下，你需要控制某个特定行应该到哪个reducer，这通常是为了进行后续的聚集操作。distribute by刚好可以做这件事。因此，distribute by经常和sort by配合使用。
+
+//根据年份和气温对气象数据进行排序，以确保所有具有相同年份的行最终都在一个reducer分区中
+
+注：Distribute by和sort by的使用场景
+1.Map输出的文件大小不均。
+2.Reduce输出文件大小不均。
+3.小文件过多。
+4.文件超大。
+
+$ cat distribute/000000_0 
+2016,23.0
+2016,39.9
+2016,32.0
+2013,34.0
+
+$ cat distribute/000001_0 
+2008,32.0
+2008,21.0
+2008,31.5
+2008,17.0
+
+$ cat distribute/000002_0 
+2015,31.0
+2015,19.9
+2015,27.0
+2015,32.0
+2015,33.0
+2015,15.9
+
+//二者结合使用
+select * from temperature distribute by year sort by year  asc, temper desc;
+2013	34.0
+2016	39.9
+2016	32.0
+2016	23.0
+2008	32.0
+2008	31.5
+2008	21.0
+2008	17.0
+2015	33.0
+2015	32.0
+2015	31.0
+2015	27.0
+2015	19.9
+2015	15.9
+
+4.cluster by  
+cluster by除了具有distribute by的功能外还兼具sort by的功能。但是排序只能是倒序排序，不能指定排序规则为ASC或
+者DESC。
+
+select * from  cluster by year;
+
+
+	窗口函数：lead   lag   FIRST_VALUE
+	分析函数: RANK ROW_NUMBER 
+
+四、分组排名 
+应用到TOPN TOPkey
+select * from  (select name,salary,deptid,row_number() over(partition by deptid order by salary desc) rank from emp) a where a.rank <= 3;
+
+row_number
+
+说明：
+row_number() over ([partition col1] [order by col2])
+rank() over ([partition col1] [order by col2])
+dense_rank() over ([partition col1] [order by col2])
+它们都是根据col1字段分组，然后对col2字段进行排序，对排序后的每行生成一个行号，这个行号从1开始递增
+col1、col2都可以是多个字段，用‘,‘分隔
+ 
+区别：
+1）row_number：不管col2字段的值是否相等，行号一直递增，比如：有两条记录的值相等，但一个是第一，一个是第二
+2）rank：上下两条记录的col2相等时，记录的行号是一样的，但下一个col2值的行号递增N（N是重复的次数），比如：有两条并列第一，下一个是第三，没有第二
+3）dense_rank：上下两条记录的col2相等时，下一个col2值的行号递增1，比如：有两条并列第一，下一个是第二
+
+ select empname,empjob,salary,deptno,row_number() over(partition by deptno order by salary desc ) rank from emp;
+
+empname	empjob	salary	deptno	rank
+MILLER	CLERK	1300.0	10	1
+CLARK	MANAGER	2450.0	10	2
+KING	PRESIDENT	5000.0	10	3
+SMITH	CLERK	800.0	20	1
+ADAMS	CLERK	1100.0	20	2
+JONES	MANAGER	2975.0	20	3
+SCOTT	ANALYST	3000.0	20	4
+FORD	ANALYST	3000.0	20	5
+JAMES	CLERK	950.0	30	1
+MARTIN	SALESMAN	1250.0	30	2
+WARD	SALESMAN	1250.0	30	3
+TURNER	SALESMAN	1500.0	30	4
+ALLEN	SALESMAN	1600.0	30	5
+BLAKE	MANAGER	2850.0	30	6
+
+//测试原数据
+Hive TopN
+a	chinese	98
+a	english	90
+a	math	90
+d	chinese	88
+c	english	82
+c	math	98
+b	math	79
+b	chinese	79
+b	english	79
+z	english	90
+z	math	89
+z	chinese	80
+e	math	99
+e	english	87
+d	english	90
+
+create table t(name string, sub string, score int) row format delimited fields terminated by '\t';
+
+load data local inpath "/home/user01/grades.txt" into table t;
+
+
+//为每个学生的各门功课成绩排名
+1、row_number
+select *,row_number() over (partition by name order by score desc) as rank from t;
+
+t.name	t.sub	t.score	rank
+a	chinese	98	1
+a	english	90	2
+a	math	90	3
+b	chinese	79	1
+b	english	79	2
+b	math	79	3
+c	math	98	1
+c	english	82	2
+d	english	90	1
+d	chinese	88	2
+e	math	99	1
+e	english	87	2
+z	english	90	1
+z	math	89	2
+z	chinese	80	3
+
+2.rank  //排序字段相同的记录使用相同的排名，下一个从值的行号递增N（N是重复的次数），比如：有两条并列第一，下一个是第三，没有第二
+select *,rank() over (partition by name order by score asc) as rank from t;
+
+t.name	t.sub	t.score	rank
+a	english	90	1
+a	math	90	1
+a	chinese	98	3
+b	chinese	79	1
+b	english	79	1
+b	math	79	1
+c	english	82	1
+c	math	98	2
+d	chinese	88	1
+d	english	90	2
+e	english	87	1
+e	math	99	2
+z	chinese	80	1
+z	math	89	2
+z	english	90	3
+
+3、dense_rank //排序字段相同的记录使用相同的排名，下一个值的行号递增1，如下：a的english和math并列第一，下一个chinese是第三，没有第二，b的三门都一样
+select *,dense_rank() over (partition by name order by score asc) as rank from t;
+
+t.name	t.sub	t.score	rank
+a	english	90	1
+a	math	90	1
+a	chinese	98	2
+b	chinese	79	1
+b	english	79	1
+b	math	79	1
+c	english	82	1
+c	math	98	2
+d	chinese	88	1
+d	english	90	2
+e	english	87	1
+e	math	99	2
+z	chinese	80	1
+z	math	89	2
+z	english	90	3
+
+业务实例：
+统计每个学科的前二名  
+select * from (select *, row_number() over(partition by name order by score desc) as rank from t )t where rank <=2;
+
+select *,row_number() over () as rank from t rank <=3;
+
+select * from (select area, barnd, yuan,  row_number() over (partition by area order by yuan desc) as rank  from order ) o where o.rank <=3;
+各地区热门商品统计
+按地区 分组  再按各个商品的销量进行降序排名 
+北京  iphone7    70000   1
+北京  xiaomi5    60000   2
+北京  mate9      50000   3
+北京   手机膜	 40000   4
+...
+上海  xiaomi5    70000   1
+上海  iphone7    60000   2
+上海  mate9      50000   3
+上海   手机膜	 40000   4
+...
+
+select * from (select empname,salary,deptid,dense_rank() over(partition by deptid order by salary desc ) rank from emp) e where e.rank <= 3;

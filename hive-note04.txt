@@ -1,0 +1,779 @@
+一、业务字段的分析
+1、日志数据文件：
+"27.38.5.159" 
+"-" 
+"31/Aug/2015:00:04:37 +0800" 
+"GET /course/view.php?id=27 HTTP/1.1" 
+"303" 
+"440" 
+- 
+"http://www.ibeifeng.com/user.php?act=mycourse" 
+"Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/31.0.1650.63 Safari/537.36" 
+"-" 
+"learn.ibeifeng.com"
+
+-》字段分析
+ip：ip有可能是个公网的ip
+time_local:
+   客户端的时间
+   服务端的时间  （一般都是服务端的时间）
+ 
+-》流程：
+   -》数据采集（HDFS、hive）
+   -》需求分析（分析哪些指标、梳理思路、获取字段）
+   -》数据清洗（ETL阶段：过滤、判断、格式转换、字段截取、临时表、清洗表）
+         -》自定义UDF函数
+		 -》自定义java类，手写MR程序、用于过滤的判断
+		 -》正则表达式匹配
+   -》数据分析（计算、处理）
+   -》结果导出（HDFS、mysql）
+   -》前端结合（js或者echarts）
+   -》数据可视化操作   
+   
+   
+   
+   
+建库：
+create database bf_log;
+建表：
+create table IF NOT EXISTS  log_source (
+remote_addr string,
+remote_user string,
+time_local string,
+request string,
+status string,
+body_bytes_sent string,
+request_body string,
+http_referer string,
+http_user_agent string,
+http_x_forwarded_for string,
+host string
+)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ' '
+stored as textfile ;
+
+load data local inpath '/opt/datas/moodle.ibeifeng.access.log' into table log_source ;
+
+字段：
+"27.38.5.159"	
+"-"	
+"31/Aug/2015:00:04:37	+0800"	
+"GET	/course/view.php?id=27	HTTP/1.1"  
+"303"	
+"440"	
+-	
+"http://www.ibeifeng.com/user.php?act=mycourse"
+
+字段中包含了分隔符导致字段在表中映射不全？
+解决方案-》正则表达式
+
+【官方实例】
+CREATE TABLE apachelog (
+  host STRING,
+  identity STRING,
+  user STRING,
+  time STRING,
+  request STRING,
+  status STRING,
+  size STRING,
+  referer STRING,
+  agent STRING)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe'
+WITH SERDEPROPERTIES (
+  "input.regex" = "([^]*) ([^]*) ([^]*) (-|\\[^\\]*\\]) ([^ \"]*|\"[^\"]*\") (-|[0-9]*) (-|[0-9]*)(?: ([^ \"]*|\".*\") ([^ \"]*|\".*\"))?"
+)
+STORED AS TEXTFILE;
+
+-》使用的是java序列化类
+-》使用正则表达式匹配文件中的每一行数据
+-》[^\\]匹配非\的字符  " ' } \  
+-》[0-9]
+(\"[^ ]*\") (\"[-|^ ]*\") (\"[^}]*\") (\"[^}]*\") (\"[0-9]*\") (\"[0-9]*\") ([-|^ ]*) (\"[^ ]*\") (\"[^\"]*\") (\"[-|^ ]*\") (\"[^ ]*\")
+
+-》使用正则建表:
+create table IF NOT EXISTS  log_src (
+remote_addr string,
+remote_user string,
+time_local string,
+request string,
+status string,
+body_bytes_sent string,
+request_body string,
+http_referer string,
+http_user_agent string,
+http_x_forwarded_for string,
+host string
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe'
+WITH SERDEPROPERTIES (
+  "input.regex" = "(\"[^ ]*\") (\"[-|^ ]*\") (\"[^}]*\") (\"[^}]*\") (\"[0-9]*\") (\"[0-9]*\") ([-|^ ]*) (\"[^ ]*\") (\"[^\"]*\") (\"[-|^ ]*\") (\"[^ ]*\")"
+)
+STORED AS TEXTFILE;
+   
+ 
+-》用户可以自己写一个java的类
+-》打成jar包添加到hive一个环境变量中
+-》调用
+
+
+二、ETL字段过滤、格式化处理
+"27.38.5.159"	
+"-"	
+"31/Aug/2015:00:04:53 +0800"	
+"GET /course/view.php?id=27 HTTP/1.1"	
+"200"	
+"7877"	
+-	
+"http://www.ibeifeng.com/user.php?act=mycourse&testsession=1637"	
+"Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/31.0.1650.63 Safari/537.36"	
+"-"	
+"learn.ibeifeng.com"
+
+-》双引号对于数据分析没有太多的作用，可以考虑去除，replace 、replaceAll  
+-》时间字段的格式转换，31/Aug/2015:00:04:53 +0800
+   理想格式：2015-08-31 00:04:53  或者  20150831000453
+-》对于某些字段进行优化，去除不必要的部分：/course/view.php?id=27
+   substring，startwith endwith
+   -》可以查看本页面的访问量，统计数据
+-》获取当前页面的前一个页面，也就是链入地址
+   通过这个链入地址可以加大对产品大力去宣传   
+
+
+三、时间格式的转换：TestDateUDF
+
+public class TestDateUDF
+  extends UDF
+{
+  public SimpleDateFormat inputDate = new SimpleDateFormat("dd/MMM/yyyy:HH:mm:ss", Locale.ENGLISH);
+  public SimpleDateFormat outputDate = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+  
+  public Text evaluate(Text time)
+  {
+    String date = null;
+    if (time == null) {
+      return null;
+    }
+    if (StringUtils.isBlank(time.toString())) {
+      return null;
+    }
+    String parse = time.toString().replaceAll("\"", "");
+    try
+    {
+      Date parseDate = this.inputDate.parse(parse);
+      date = this.outputDate.format(parseDate);
+    }
+    catch (ParseException e)
+    {
+      e.printStackTrace();
+    }
+    return new Text(date);
+  }
+  }
+-》将代码打成jar包上传到linux服务器里
+-》将jar包和hive进行关联
+add jar /opt/datas/DateUDF.jar;
+-》创建函数：
+create temporary function pdate as 'ibeifeng.hadoop.TestDateUDF';
+-》检验udf是否生效
+select pdate(time_local) from log_src limit 10;
+结果：
+2015-08-31 00:04:37
+2015-08-31 00:04:37
+2015-08-31 00:04:53
+2015-08-31 00:04:53
+2015-08-31 00:04:53
+2015-08-31 00:04:53
+2015-08-31 00:04:53
+2015-08-31 00:04:53
+2015-08-31 00:04:53
+2015-08-31 00:04:53
+
+-》jar包放在HDFS上(也算是一个永久的方法)
+create function pdate2 as 'ibeifeng.hadoop.TestDateUDF' using jar 'hdfs://ibeifeng.class:8020/DateUDF.jar';
+select pdate2(time_local) from log_src limit 10;
+
+-》hive永久生效funtion
+   -》需要jar包添加到hive的环境变量中，hive-env.sh
+   -》需要编译hive的对应版本的源码
+
+四、使用python脚本预处理数据
+
+创建表：
+CREATE TABLE u_data (
+  userid INT,
+  movieid INT,
+  rating INT,
+  unixtime STRING)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t'
+STORED AS TEXTFILE;
+
+下载：
+wget http://files.grouplens.org/datasets/movielens/ml-100k.zip
+解压:unzip ml-100k.zip
+
+加载数据：
+LOAD DATA LOCAL INPATH '/opt/datas/ml-100k/u.data' OVERWRITE INTO TABLE u_data;
+
+python脚本注意代码缩进
+
+import sys
+import datetime
+
+for line in sys.stdin:
+  line = line.strip()
+  userid, movieid, rating, unixtime = line.split('\t')
+  weekday = datetime.datetime.fromtimestamp(float(unixtime)).isoweekday()
+  print '\t'.join([userid, movieid, rating, str(weekday)])
+
+创建新表：
+CREATE TABLE u_data_new (
+  userid INT,
+  movieid INT,
+  rating INT,
+  weekday INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '\t';
+
+脚本与hive进行关联：跟add jar 类似
+add FILE weekday_mapper.py;
+
+使用：
+INSERT OVERWRITE TABLE u_data_new
+SELECT
+  TRANSFORM (userid, movieid, rating, unixtime)
+  USING 'python weekday_mapper.py'
+  AS (userid, movieid, rating, weekday)
+FROM u_data;
+
+查看数据：
+SELECT weekday, COUNT(*)
+FROM u_data_new
+GROUP BY weekday;
+结果：
+weekday	_c1
+1	12254
+2	13579
+3	14430
+4	15114
+5	14743
+6	18229
+7	11651
+
+使用python脚本对unixtime进行转换，最终对应一周的周几
+
+四、hive自带时间函数unixtime
+    -》常见类 2015-08-31 00:04:37
+	-》unix时间：
+	   timestamp，以格林威治时间为基准，1970年1月1日0时0分0秒开始统计一直到现在的时间
+	-》hive自带函数：unix_timestamp
+	
+-》场景：计算中间时间差2015-08-31 00:04:37   2015-12-16 00:04:37
+   查看两条记录之间的时间差
+-》场景：可以分析网站后台日志数据，统计下用户停留时间
+
+-》测试hive自带unix_timestamp:
+select unix_timestamp("2017-12-16 11:38:55");
+
+注意：格式，是null值
+select unix_timestamp("20171216 11:38:55")
+
+-》指定格式进行转换
+select unix_timestamp("20171216 11:38:55","yyyyMMdd HH:mm:ss");
+
+-》转换时间段
+select unix_timestamp("time","yyyyMMdd HH:mm:ss");
+
+-》将unixtime转换成标准时区格式：from_unixtime   将1513395535  转换为标准
+select from_unixtime(1513395535,"yyyy-MM-dd HH:mm:ss"); 
+
+五、case when
+
+需求：将emp表的奖金这列如果说没有显示0而不是null
+select empno,ename,
+case 
+when comm is null then 0
+else comm
+end
+from emp;
+
+select empno,ename,
+case 
+when sal<1000 then 'low'
+when sal>=1000 and sal <3000 then 'middle'
+else 'high'
+end  as new_sal
+from emp;
+
+cast类型的一个转换:
+ 将薪资类型转化为string类型
+create table casttest as select empno,ename,cast(sal as string)new_sal from emp;
+
+六、hive综合案例
+
+-》需求分析
+日期	uv	pv	登录人数	游客人数  平均访问时长	二跳率	独立ip数
+
+登录：userid有值，会员，有账号登录
+游客：userid无值，非登录人员
+平均访问时长：在网页停留时间
+二跳率：在一次会话中，点击的页面大于等于2的会话就是二跳
+独立ip数：统计ip去重
+
+trackU访问渠道：表是你是通过什么方式进入到网站
+    -》搜索引擎进入
+	-》手输网页
+	-》论坛、博客
+	-》广告、脚本
+	-》等等。。
+ 作用：可以渠道的来源，加大投放力度，去宣传
+ 
+-》数据采集
+-》创建源表
+create database yhd;
+
+create table yhd_source(
+id              string,
+url             string,
+referer         string,
+keyword         string,
+type            string,
+guid            string,
+pageId          string,
+moduleId        string,
+linkId          string,
+attachedInfo    string,
+sessionId       string,
+trackerU        string,
+trackerType     string,
+ip              string,
+trackerSrc      string,
+cookie          string,
+orderCode       string,
+trackTime       string,
+endUserId       string,
+firstLink       string,
+sessionViewNo   string,
+productId       string,
+curMerchantId   string,
+provinceId      string,
+cityId          string,
+fee             string,
+edmActivity     string,
+edmEmail        string,
+edmJobId        string,
+ieVersion       string,
+platform        string,
+internalKeyword string,
+resultSum       string,
+currentPage     string,
+linkPosition    string,
+buttonPosition  string
+)partitioned by (date string)
+row format delimited fields terminated by "\t";
+
+load data local inpath '/opt/datas/2015082818' into table yhd_source partition(date ='2015082818');
+ 
+数据清洗： 
+ 
+-》创建会话信息表：
+create table session_info(
+session_id string ,
+guid string ,
+trackerU string ,
+landing_url string ,
+landing_url_ref string ,
+user_id string ,
+pv string ,
+stay_time string ,
+min_trackTime string ,
+ip string ,
+provinceId string 
+)
+partitioned by (date string)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' ;
+  
+-》加载数据: 数据源来自源表
+-》针对每一个会话进行分组group by sessionId
+-》进行分组之后，trackerU，landing_url,landing_url_ref多条记录，获取第一条记录
+
+创建一张临时表：
+create table session_tmp as
+select 
+sessionId session_id,
+max(guid)  guid,
+max(endUserId) user_id,
+count(distinct url) pv,
+(unix_timestamp(max(trackTime))-unix_timestamp(min(trackTime))) stay_time,
+min(trackTime) min_trackTime,
+max(ip) ip,
+max(provinceId) provinceId
+from yhd_source where date = '2015082818'
+group by sessionId;
+
+-》从源表中获取每一条记录的trackerU，landing_url,landing_url_ref
+-》从源表中获取每一条记录的时间
+-》然后进行最小的时间与源表的最小时间进行join
+
+创建第二张临时表：
+-》从源表中获取5个字段信息
+在track_Time包含了min_trackTime
+
+create table track_tmp as
+select 
+sessionId session_id,
+trackTime trackTime,
+url landing_url,
+trackerU trackerU,
+referer landing_url_ref
+from yhd_source where date='2015082818';
+
+两张临时表进行join：
+insert overwrite table session_info partition(date='2015082818')
+select
+a.session_id,
+a.guid,
+b.trackerU,
+b.landing_url,
+b.landing_url_ref,
+a.user_id,
+a.pv,
+a.stay_time,
+a.min_trackTime,
+a.ip,
+a.provinceId
+from session_tmp a join track_tmp b
+on a.session_id=b.session_id and a.min_trackTime=b.trackTime;
+
+数据分析：结果表  因为有日期所以按天进行分组，group by date
+create table result as
+select
+date date,
+sum(pv) PV,
+count(distinct guid) UV,
+count(distinct case when user_id is not null then user_id else null end) login_user,
+count(distinct case when user_id is null then guid else null end) visitor,
+avg(stay_time) avg_time,
+count(case when pv>=2 then session_id else null end)/count(session_id) second_jump,
+count(distinct ip) IP
+from session_info where date='2015082818'
+group by date;
+
+-》结果
+日期	      uv	    pv	    登录人数	  游客人数    平均访问时长	          二跳率	           独立ip数
+2015082818	23928	   37843.0	11412	       0	       50.10636239012983	0.26695427788081605	    19174
+
+
+create table result2 as
+select
+date date,
+sum(pv) PV,
+count(distinct guid) UV,
+count(distinct case when length(user_id)!=0  then user_id else null end) login_user,
+count(distinct case when length(user_id)=0 then guid else null end) visitor,
+avg(stay_time) avg_time,
+count(case when pv>=2 then session_id else null end)/count(session_id) second_jump,
+count(distinct ip) IP
+from session_info where date='2015082818'
+group by date;
+
+日期	      uv	    pv	    登录人数	  游客人数    平均访问时长	          二跳率	           独立ip数
+2015082818	 23928	  37843.0	11411	      12367	       50.10636239012983	0.26695427788081605	     19174
+
+七、hive优化
+-》大表拆小表：
+   -》临时表、分区表、外部表
+
+-》sql语句
+    优化sql：复杂的sql-》子查询+join  -》简化，拆分成多个简单的语句
+	join、filter：一般都是先过滤再join
+	
+-》合理设置map和reduce的个数
+    怎么设置map的个数：	一个分片就是一个块，一个maptask
+		   源码里面有FileInputFormat类splitsize方法
+		 Math.max(min_size,Math.min(max_size,block_size));
+		   min_size默认参数值是0M
+		   max_size默认参数值是Long类型的最大值
+		   block_size  ---> 128M	 
+		设置max_size和min_size
+		  FileInputFormat.setMaxInputSplitSize(job,size)
+		  FileInputFormat.setMinInputSplitSize(job,size)
+	
+	reduce数量：默认的是一个
+	  在hive：set mapreduce.job.reduces
+	  在mr中：job.setNumReduceTask
+	
+-》开启并行执行
+	开关（但是并行执行必须满足，一条sql中的不同job没有上下依赖关系）：
+	hive.exec.parallel
+
+	设置同时运行的线程数，默认是8个
+	hive.exec.parallel.thread.number
+
+-》jvm重用
+    mapreduce.job.jvm.numtasks 默认是1个，一般可以设置为3或5 ，节省资源
+	
+-》推测执行
+    比如：运行十个map和十个reduce任务 --》九个都执行完毕了，有一个reduce还没结束
+     mapreduce会重新开启一个跟这个一模一样的任务，两个相同的任务去完成同样一件事情，谁先完成那么另一个就会
+	 被kill掉
+	 
+	缺点：会消耗资源，一般不建议开启，有可能数据重复写入，造成异常
+	
+-》hive本地模式
+     hive.exec.mode.local.auto  默认是不开启的
+	 速度上会很快
+	 
+	 限制：job的输入数据不能大于128M，map个数不能超过4个，reduce的个数不能超过一个
+	 
+八、hive数据倾斜	
+ 
+-》在MR中由于某个key值分布不均匀，导致某个reduce运行速度严重缓慢。影响了整个job的运行
+  -》考虑分区的阶段，自定义实现分区的规划来避免产生倾斜
+  -》在key中加入随机数的侧率，打乱分区
+
+00 1    reduce1
+01 2    reduce2
+02 3    reduce3
+03 3    reduce1
+04 3    reduce2
+
+在hive中：
+ 产生倾斜的主要语句：join、group by、distinct
+   join: map join、 reduce join、 Smb join（sort merge bucket）
+  -》map join适合小表join大表的场景
+  -》reduce join适合大表join大表
+  -》smb join 适合大表join大表
+     分区与分区的join，建少了join的范围
+	 适合桶与桶之间的join
+	 两张表之间的join，他们的桶数的关系要么相等，要么就是成因数，倍数关系
+A表： 1000万数据    分三个桶
+     0000-0300    1桶
+     0301-0600    2桶
+     0601-1000    3桶	 
+	
+B表： 1000万数据    分三个桶
+     0000-0200    1桶
+     0201-0400    2桶
+     0401-0600    3桶
+     0601-1800    4桶	 
+	 0801-900     5桶
+	 0901-1000    6桶
+	              
+map join
+-》开启map join ,符合条件就会去执行
+	
+<property>
+  <name>hive.auto.convert.join</name>
+  <value>true</value>
+  <description>Whether Hive enables the optimization about converting common join into mapjoin based on the input file size</description>
+</property>	
+	
+-》执行map join的条件，默认10M
+<property>
+  <name>hive.auto.convert.join.noconditionaltask.size</name>
+  <value>10000000</value>
+  <description>If hive.auto.convert.join.noconditionaltask is off, this parameter does not take affect. However, if it
+    is on, and the sum of size for n-1 of the tables/partitions for a n-way join is smaller than this size, the join is directly
+    converted to a mapjoin(there is no conditional task). The default is 10MB
+  </description>
+</property>	
+
+九、hive的高压缩存储格式
+
+ [STORED AS file_format]
+
+file_format:
+  : SEQUENCEFILE   行存储，存储二进制文件
+  | TEXTFILE       行存储（磁盘开销大）
+  | RCFILE         数据是按行进行分块，每块按照列存储（压缩快）
+  | ORC            rc的改良版
+  | PARQUET        列式存储，良好压缩性能
+  | AVRO           为了解析Avro格式的数据
+  | INPUTFORMAT input_format_classname OUTPUTFORMAT output_format_classname  自定义格式
+  
+原文本数据：
+create table file_source(
+id              string,
+url             string,
+referer         string,
+keyword         string,
+type            string,
+guid            string,
+pageId          string,
+moduleId        string,
+linkId          string,
+attachedInfo    string,
+sessionId       string,
+trackerU        string,
+trackerType     string,
+ip              string,
+trackerSrc      string,
+cookie          string,
+orderCode       string,
+trackTime       string,
+endUserId       string,
+firstLink       string,
+sessionViewNo   string,
+productId       string,
+curMerchantId   string,
+provinceId      string,
+cityId          string,
+fee             string,
+edmActivity     string,
+edmEmail        string,
+edmJobId        string,
+ieVersion       string,
+platform        string,
+internalKeyword string,
+resultSum       string,
+currentPage     string,
+linkPosition    string,
+buttonPosition  string
+)
+row format delimited fields terminated by "\t";
+
+load data local inpath '/opt/datas/2015082818' into table file_source;
+
+【textfile】
+create table file_text(
+id              string,
+url             string,
+referer         string,
+keyword         string,
+type            string,
+guid            string,
+pageId          string,
+moduleId        string,
+linkId          string,
+attachedInfo    string,
+sessionId       string,
+trackerU        string,
+trackerType     string,
+ip              string,
+trackerSrc      string,
+cookie          string,
+orderCode       string,
+trackTime       string,
+endUserId       string,
+firstLink       string,
+sessionViewNo   string,
+productId       string,
+curMerchantId   string,
+provinceId      string,
+cityId          string,
+fee             string,
+edmActivity     string,
+edmEmail        string,
+edmJobId        string,
+ieVersion       string,
+platform        string,
+internalKeyword string,
+resultSum       string,
+currentPage     string,
+linkPosition    string,
+buttonPosition  string
+)
+row format delimited fields terminated by "\t"
+STORED AS TEXTFILE;
+
+insert into table file_text select * from file_source; 
+
+【parquet】
+create table file_parquet(
+id              string,
+url             string,
+referer         string,
+keyword         string,
+type            string,
+guid            string,
+pageId          string,
+moduleId        string,
+linkId          string,
+attachedInfo    string,
+sessionId       string,
+trackerU        string,
+trackerType     string,
+ip              string,
+trackerSrc      string,
+cookie          string,
+orderCode       string,
+trackTime       string,
+endUserId       string,
+firstLink       string,
+sessionViewNo   string,
+productId       string,
+curMerchantId   string,
+provinceId      string,
+cityId          string,
+fee             string,
+edmActivity     string,
+edmEmail        string,
+edmJobId        string,
+ieVersion       string,
+platform        string,
+internalKeyword string,
+resultSum       string,
+currentPage     string,
+linkPosition    string,
+buttonPosition  string
+)
+row format delimited fields terminated by "\t"
+STORED AS parquet;
+
+insert into table file_parquet select * from file_source;
+
+【orc】 
+create table file_orc(
+id              string,
+url             string,
+referer         string,
+keyword         string,
+type            string,
+guid            string,
+pageId          string,
+moduleId        string,
+linkId          string,
+attachedInfo    string,
+sessionId       string,
+trackerU        string,
+trackerType     string,
+ip              string,
+trackerSrc      string,
+cookie          string,
+orderCode       string,
+trackTime       string,
+endUserId       string,
+firstLink       string,
+sessionViewNo   string,
+productId       string,
+curMerchantId   string,
+provinceId      string,
+cityId          string,
+fee             string,
+edmActivity     string,
+edmEmail        string,
+edmJobId        string,
+ieVersion       string,
+platform        string,
+internalKeyword string,
+resultSum       string,
+currentPage     string,
+linkPosition    string,
+buttonPosition  string
+)
+row format delimited fields terminated by "\t"
+STORED AS orc;
+
+insert into table file_orc select * from file_source; 
+
+
+
+做下对比：存储类型的数据大小
+file_source    37.6M
+file_text      27.48 MB
+file_parquet   16.14 MB
+file_orc       4.4 MB
+
+textfile,SEQUENCEFILE能不用不用，最好使用orc
+

@@ -1,0 +1,50 @@
+1、在mysql中创建数据表
+create table inc_tab(
+id int,
+name varchar(20),
+last_mod timestamp default current_timestamp on update current_timestamp
+);
+注释：last_mod timestamp default current_timestamp on update current_timestamp
+	这一串就是会自动把insert的数据的对应的时间放到这个字段中
+
+2、可以查看下表的信息
+desc inc_tab;
+
+3、插入数据
+insert into inc_tab(id,name) values(1,'neil');
+insert into inc_tab(id,name) values(2,'jack');
+insert into inc_tab(id,name) values(3,'martin');
+insert into inc_tab(id,name) values(4,'tony');
+insert into inc_tab(id,name) values(5,'eric');
+
+4、执行sqoop从mysql导入到hdfs
+bin/sqoop import \
+--connect jdbc:mysql://bigdata-03:3306/sqoop \
+--username root \
+--password 123456 \
+--table inc_tab \
+--target-dir /sqoop_test2 \
+--fields-terminated-by '\t' \
+--num-mappers 1
+
+5、重新插入数据
+insert into inc_tab(id,name) values(6,'martin');
+insert into inc_tab(id,name) values(7,'tony');
+insert into inc_tab(id,name) values(8,'eric');
+
+6、重新导出数据
+bin/sqoop import \
+--connect jdbc:mysql://bigdata-03:3306/sqoop \
+--username root \
+--password 123456 \
+--table inc_tab \
+--target-dir /sqoop_test2 \
+--check-column last_mod \
+--fields-terminated-by '\t' \
+--incremental lastmodified \
+--last-value "2017-12-25 23:02:00" \
+--num-mappers 1 \
+--append
+
+注意：这里的时间--last-value "2017-12-25 23:02:00" 
+	是大于这个时间就会插入，有可能会重复插入数据，自己注意上一次的时间值
